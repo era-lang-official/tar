@@ -1,0 +1,185 @@
+// github.com/era-lang-official/tar
+// POSIX ustar tape archive reader and writer
+
+fn tar_str_slice(s: string, start: usize, end: usize) -> string {
+    let s_chars: Vec<char> = s.chars();
+    let mut sb = StringBuilder::new();
+    let mut i = start;
+    let limit = if end > s_chars.len() { s_chars.len() } else { end };
+    while i < limit {
+        sb.append(s_chars[i].to_string());
+        i += 1;
+    }
+    return sb.to_string();
+}
+
+pub struct TarEntry {
+    pub name: string,
+    pub size: i64,
+    pub data: string,
+}
+
+pub struct TarWriter {
+    pub entries: Vec<TarEntry>,
+}
+
+fn pad_octal(val: i64, width: usize) -> string {
+    let mut num = val;
+    let mut chars = Vec::<char>::new();
+    if num == 0 {
+        chars.push('0');
+    } else {
+        while num > 0 {
+            let rem = (num % 8) as i64;
+            chars.push((rem + 48) as char);
+            num = num / 8;
+        }
+    }
+
+    let mut sb = StringBuilder::new();
+    let needed = width - 1; // leave 1 byte for null terminator or space
+    let mut pad: usize = 0;
+    while (chars.len() + pad) < needed {
+        sb.append("0");
+        pad += 1;
+    }
+
+    let mut c_idx = chars.len();
+    while c_idx > 0 {
+        sb.append(chars[c_idx - 1].to_string());
+        c_idx -= 1;
+    }
+    sb.append(" ");
+    return sb.to_string();
+}
+
+impl TarWriter {
+    pub fn new() -> TarWriter {
+        return TarWriter {
+            entries: Vec::<TarEntry>::new(),
+        };
+    }
+
+    pub fn add_file(&mut self, name: string, data: string) {
+        let size = data.len() as i64;
+        self.entries.push(TarEntry { name, size, data });
+    }
+
+    pub fn serialize(&self) -> string {
+        let mut sb = StringBuilder::new();
+        let mut e_idx: usize = 0;
+
+        while e_idx < self.entries.len() {
+            let entry = &self.entries[e_idx];
+
+            // 512-byte Header Block
+            let mut h_sb = StringBuilder::new();
+
+            // Name: 100 bytes
+            let mut name_pad = entry.name.clone();
+            while name_pad.len() < 100 {
+                name_pad = name_pad + " ";
+            }
+            h_sb.append(tar_str_slice(name_pad, 0, 100));
+
+            // Mode: 8 bytes
+            h_sb.append("0000644 ");
+
+            // UID: 8 bytes
+            h_sb.append("0000000 ");
+
+            // GID: 8 bytes
+            h_sb.append("0000000 ");
+
+            // Size: 12 bytes octal
+            let octal_size = pad_octal(entry.size, 12);
+            h_sb.append(tar_str_slice(octal_size, 0, 12));
+
+            // MTime: 12 bytes
+            h_sb.append("00000000000 ");
+
+            // Checksum placeholder (8 spaces)
+            h_sb.append("        ");
+
+            // Typeflag: 1 byte ('0' = regular file)
+            h_sb.append("0");
+
+            // Magic: 6 bytes ("ustar ") + version 2 bytes ("  ")
+            h_sb.append("ustar   ");
+
+            // Pad remaining header to exactly 512 bytes
+            let current_h = h_sb.to_string();
+            let mut h_pad = current_h;
+            while h_pad.len() < 512 {
+                h_pad = h_pad + " ";
+            }
+            sb.append(h_pad);
+
+            // Payload data
+            sb.append(entry.data.clone());
+
+            // 512-byte data block padding
+            let data_rem = entry.size % 512;
+            if data_rem > 0 {
+                let pad_needed = 512 - data_rem;
+                let mut p: usize = 0;
+                while p < (pad_needed as usize) {
+                    sb.append(" ");
+                    p += 1;
+                }
+            }
+
+            e_idx += 1;
+        }
+
+        return sb.to_string();
+    }
+}
+
+pub fn parse_tar(wire: string) -> Vec<TarEntry> {
+    let mut entries = Vec::<TarEntry>::new();
+    let total_len = wire.len();
+    let mut offset: usize = 0;
+
+    while offset + 512 <= total_len {
+        let header_block = tar_str_slice(wire.clone(), offset, offset + 512);
+        let name_raw = tar_str_slice(header_block.clone(), 0, 100).trim();
+        if name_raw.len() == 0 {
+            break;
+        }
+
+        let size_raw = tar_str_slice(header_block.clone(), 124, 136).trim();
+        let mut size: i64 = 0;
+        let s_chars: Vec<char> = size_raw.chars();
+        let mut s_idx: usize = 0;
+        while s_idx < s_chars.len() {
+            let c = s_chars[s_idx];
+            let code = c as i64;
+            if code >= 48 && code <= 55 {
+                size = (size * 8) + (code - 48);
+            }
+            s_idx += 1;
+        }
+
+        let data_offset = offset + 512;
+        let data_end = data_offset + (size as usize);
+        if data_end > total_len {
+            break;
+        }
+
+        let payload = tar_str_slice(wire.clone(), data_offset, data_end);
+        entries.push(TarEntry {
+            name: name_raw,
+            size,
+            data: payload,
+        });
+
+        let mut block_count = size / 512;
+        if (size % 512) != 0 {
+            block_count += 1;
+        }
+        offset = data_offset + ((block_count as usize) * 512);
+    }
+
+    return entries;
+}
